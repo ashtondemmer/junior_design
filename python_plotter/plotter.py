@@ -2,52 +2,75 @@ import serial
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore
 from collections import deque
-
-
+from scipy.signal import iirnotch, lfilter, lfilter_zi
+import numpy as np
+ 
+ 
 PORT = "COM3"
 BAUD = 9600
 MAX_POINTS = 5000
-
-
+ 
+# ---- Notch filter settings ----
+SAMPLE_RATE = 250.0   # Hz — set this to your Arduino's actual ADC sample rate
+NOTCH_FREQ  = 60.0    # Hz — frequency you want to remove (60 in US, 50 in EU)
+QUALITY     = 30.0    # Q factor — higher = narrower notch (30 is a good default)
+ 
+# Design the notch filter once at startup
+b, a = iirnotch(w0=NOTCH_FREQ, Q=QUALITY, fs=SAMPLE_RATE)
+# Initialize the filter's internal state so it doesn't "ring" at the start.
+# Multiplying by 0 gives a zero-state start; you can also seed with the first
+# sample (zi = lfilter_zi(b, a) * first_sample) to avoid a startup transient.
+zi = lfilter_zi(b, a) * 0.0
+ 
+ 
 # Setup serial
 ser = serial.Serial(PORT, BAUD, timeout=0.1)
-
-
+ 
+ 
 # Setup plot
 app = pg.mkQApp()
 win = pg.GraphicsLayoutWidget(show=True, title="ADC Plotter")
-plot = win.addPlot(title="Real-Time ADC Data")
+plot = win.addPlot(title=f"Real-Time ADC Data (notch @ {NOTCH_FREQ:.0f} Hz)")
 plot.setYRange(0, 1023)
 plot.setLabel('left', 'ADC Value')
 plot.setLabel('bottom', 'Sample')
 plot.showGrid(x=True, y=True)
-curve = plot.plot(pen='y') # Use this to change trace color (I like 'g')
-
-
-# Data buffer
+curve = plot.plot(pen='y')  # Use this to change trace color (I like 'g')
+ 
+ 
+# Data buffer (holds FILTERED samples for plotting)
 data = deque(maxlen=MAX_POINTS)
-
-
+ 
+ 
 def update():
+    global zi
+ 
     # Read serial data:
+    new_samples = []
     while ser.in_waiting:
         try:
             line = ser.readline().decode(errors='ignore').strip()
             if line:
-                value = int(line)
-                data.append(value)
+                new_samples.append(int(line))
         except:
             pass
-   
+ 
+    # Apply the notch filter to whatever new samples arrived this tick,
+    # carrying the filter state `zi` forward so the filter is continuous
+    # across update() calls.
+    if new_samples:
+        filtered, zi = lfilter(b, a, np.asarray(new_samples, dtype=float), zi=zi)
+        data.extend(filtered)
+ 
     # Update plot
     curve.setData(list(data))
-
-
+ 
+ 
 # Timer for updates
 timer = QtCore.QTimer()
 timer.timeout.connect(update)
-timer.start(20)  # Update every 50ms
-
-
+timer.start(20)  # Update every 20 ms
+ 
+ 
 pg.exec()
 ser.close()
